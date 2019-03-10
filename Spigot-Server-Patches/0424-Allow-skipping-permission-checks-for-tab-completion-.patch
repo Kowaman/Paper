@@ -1,0 +1,1671 @@
+From a63b9058e3e4ef227baef804098ac906944b2580 Mon Sep 17 00:00:00 2001
+From: Kowaman <nickinpie@gmail.com>
+Date: Sun, 10 Mar 2019 19:34:41 -0400
+Subject: [PATCH] Allow skipping permission checks for tab-completion tree
+ generation
+
+This commit adds a workaround to populating the tab-completion tree on logins. For larger servers with many plugins and a large amount of players logging in simultaniously (ie after a restart), populating a permission-sensitive tab-completion tree for every player can slow down logins signifigantly.
+
+This patch will populate a tab-completion tree with all commands on the first login, then use this tree for each subsequent login.
+
+This will allow every player to see all commands with tab-completion.
+
+diff --git a/src/main/java/com/destroystokyo/paper/PaperConfig.java b/src/main/java/com/destroystokyo/paper/PaperConfig.java
+index a7673dd4..d5bd0ace 100644
+--- a/src/main/java/com/destroystokyo/paper/PaperConfig.java
++++ b/src/main/java/com/destroystokyo/paper/PaperConfig.java
+@@ -1,465 +1,471 @@
+-package com.destroystokyo.paper;
+-
+-import com.google.common.base.Strings;
+-import com.google.common.base.Throwables;
+-
+-import java.io.File;
+-import java.io.IOException;
+-import java.lang.reflect.InvocationTargetException;
+-import java.lang.reflect.Method;
+-import java.lang.reflect.Modifier;
+-import java.nio.charset.StandardCharsets;
+-import java.util.HashMap;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.Set;
+-import java.util.concurrent.TimeUnit;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+-import java.util.regex.Pattern;
+-
+-import com.google.common.collect.Lists;
+-import net.minecraft.server.MinecraftServer;
+-import org.bukkit.Bukkit;
+-import org.bukkit.ChatColor;
+-import org.bukkit.command.Command;
+-import org.bukkit.configuration.ConfigurationSection;
+-import org.bukkit.configuration.InvalidConfigurationException;
+-import org.bukkit.configuration.file.YamlConfiguration;
+-import co.aikar.timings.Timings;
+-import co.aikar.timings.TimingsManager;
+-import org.spigotmc.SpigotConfig;
+-import org.spigotmc.WatchdogThread;
+-
+-public class PaperConfig {
+-
+-    private static File CONFIG_FILE;
+-    private static final String HEADER = "This is the main configuration file for Paper.\n"
+-            + "As you can see, there's tons to configure. Some options may impact gameplay, so use\n"
+-            + "with caution, and make sure you know what each option does before configuring.\n"
+-            + "\n"
+-            + "If you need help with the configuration or have any questions related to Paper,\n"
+-            + "join us in our Discord or IRC channel.\n"
+-            + "\n"
+-            + "Discord: https://paperdiscord.emc.gs\n"
+-            + "IRC: #paper @ irc.spi.gt ( http://irc.spi.gt/iris/?channels=paper )\n"
+-            + "Website: https://papermc.io/ \n"
+-            + "Docs: https://paper.readthedocs.org/ \n";
+-    /*========================================================================*/
+-    public static YamlConfiguration config;
+-    static int version;
+-    static Map<String, Command> commands;
+-    private static boolean verbose;
+-    private static boolean fatalError;
+-    /*========================================================================*/
+-    private static boolean metricsStarted;
+-
+-    public static void init(File configFile) {
+-        CONFIG_FILE = configFile;
+-        config = new YamlConfiguration();
+-        try {
+-            config.load(CONFIG_FILE);
+-        } catch (IOException ex) {
+-        } catch (InvalidConfigurationException ex) {
+-            Bukkit.getLogger().log(Level.SEVERE, "Could not load paper.yml, please correct your syntax errors", ex);
+-            throw Throwables.propagate(ex);
+-        }
+-        config.options().header(HEADER);
+-        config.options().copyDefaults(true);
+-        verbose = getBoolean("verbose", false);
+-
+-        commands = new HashMap<String, Command>();
+-        commands.put("paper", new PaperCommand("paper"));
+-
+-        version = getInt("config-version", 17);
+-        set("config-version", 17);
+-        readConfig(PaperConfig.class, null);
+-    }
+-
+-    protected static void logError(String s) {
+-        Bukkit.getLogger().severe(s);
+-    }
+-
+-    protected static void fatal(String s) {
+-        fatalError = true;
+-        throw new RuntimeException("Fatal paper.yml config error: " + s);
+-    }
+-
+-    protected static void log(String s) {
+-        if (verbose) {
+-            Bukkit.getLogger().info(s);
+-        }
+-    }
+-
+-    public static void registerCommands() {
+-        for (Map.Entry<String, Command> entry : commands.entrySet()) {
+-            MinecraftServer.getServer().server.getCommandMap().register(entry.getKey(), "Paper", entry.getValue());
+-        }
+-
+-        if (!metricsStarted) {
+-            Metrics.PaperMetrics.startMetrics();
+-            metricsStarted = true;
+-        }
+-    }
+-
+-    static void readConfig(Class<?> clazz, Object instance) {
+-        for (Method method : clazz.getDeclaredMethods()) {
+-            if (Modifier.isPrivate(method.getModifiers())) {
+-                if (method.getParameterTypes().length == 0 && method.getReturnType() == Void.TYPE) {
+-                    try {
+-                        method.setAccessible(true);
+-                        method.invoke(instance);
+-                    } catch (InvocationTargetException ex) {
+-                        throw Throwables.propagate(ex.getCause());
+-                    } catch (Exception ex) {
+-                        Bukkit.getLogger().log(Level.SEVERE, "Error invoking " + method, ex);
+-                    }
+-                }
+-            }
+-        }
+-
+-        try {
+-            config.save(CONFIG_FILE);
+-        } catch (IOException ex) {
+-            Bukkit.getLogger().log(Level.SEVERE, "Could not save " + CONFIG_FILE, ex);
+-        }
+-    }
+-
+-    private static final Pattern SPACE = Pattern.compile(" ");
+-    private static final Pattern NOT_NUMERIC = Pattern.compile("[^-\\d.]");
+-    public static int getSeconds(String str) {
+-        str = SPACE.matcher(str).replaceAll("");
+-        final char unit = str.charAt(str.length() - 1);
+-        str = NOT_NUMERIC.matcher(str).replaceAll("");
+-        double num;
+-        try {
+-            num = Double.parseDouble(str);
+-        } catch (Exception e) {
+-            num = 0D;
+-        }
+-        switch (unit) {
+-            case 'd': num *= (double) 60*60*24; break;
+-            case 'h': num *= (double) 60*60; break;
+-            case 'm': num *= (double) 60; break;
+-            default: case 's': break;
+-        }
+-        return (int) num;
+-    }
+-
+-    protected static String timeSummary(int seconds) {
+-        String time = "";
+-
+-        if (seconds > 60 * 60 * 24) {
+-            time += TimeUnit.SECONDS.toDays(seconds) + "d";
+-            seconds %= 60 * 60 * 24;
+-        }
+-
+-        if (seconds > 60 * 60) {
+-            time += TimeUnit.SECONDS.toHours(seconds) + "h";
+-            seconds %= 60 * 60;
+-        }
+-
+-        if (seconds > 0) {
+-            time += TimeUnit.SECONDS.toMinutes(seconds) + "m";
+-        }
+-        return time;
+-    }
+-
+-    private static void set(String path, Object val) {
+-        config.set(path, val);
+-    }
+-
+-    private static boolean getBoolean(String path, boolean def) {
+-        config.addDefault(path, def);
+-        return config.getBoolean(path, config.getBoolean(path));
+-    }
+-
+-    private static double getDouble(String path, double def) {
+-        config.addDefault(path, def);
+-        return config.getDouble(path, config.getDouble(path));
+-    }
+-
+-    private static float getFloat(String path, float def) {
+-        // TODO: Figure out why getFloat() always returns the default value.
+-        return (float) getDouble(path, (double) def);
+-    }
+-
+-    private static int getInt(String path, int def) {
+-        config.addDefault(path, def);
+-        return config.getInt(path, config.getInt(path));
+-    }
+-
+-    private static <T> List getList(String path, T def) {
+-        config.addDefault(path, def);
+-        return (List<T>) config.getList(path, config.getList(path));
+-    }
+-
+-    private static String getString(String path, String def) {
+-        config.addDefault(path, def);
+-        return config.getString(path, config.getString(path));
+-    }
+-
+-    public static int maxTickMsLostLightQueue;
+-    private static void lightQueue() {
+-        int badSetting = config.getInt("queue-light-updates-max-loss", 10);
+-        config.set("queue-light-updates-max-loss", null);
+-        maxTickMsLostLightQueue = getInt("settings.queue-light-updates-max-loss", badSetting);
+-    }
+-
+-    private static void timings() {
+-        boolean timings = getBoolean("timings.enabled", true);
+-        boolean verboseTimings = getBoolean("timings.verbose", true);
+-        TimingsManager.privacy = getBoolean("timings.server-name-privacy", false);
+-        TimingsManager.hiddenConfigs = getList("timings.hidden-config-entries", Lists.newArrayList("database", "settings.bungeecord-addresses"));
+-        int timingHistoryInterval = getInt("timings.history-interval", 300);
+-        int timingHistoryLength = getInt("timings.history-length", 3600);
+-
+-
+-        Timings.setVerboseTimingsEnabled(verboseTimings);
+-        Timings.setTimingsEnabled(timings);
+-        Timings.setHistoryInterval(timingHistoryInterval * 20);
+-        Timings.setHistoryLength(timingHistoryLength * 20);
+-
+-        log("Timings: " + timings +
+-                " - Verbose: " + verboseTimings +
+-                " - Interval: " + timeSummary(Timings.getHistoryInterval() / 20) +
+-                " - Length: " + timeSummary(Timings.getHistoryLength() / 20));
+-    }
+-
+-    public static boolean enableFileIOThreadSleep;
+-    private static void enableFileIOThreadSleep() {
+-        enableFileIOThreadSleep = getBoolean("settings.sleep-between-chunk-saves", false);
+-        if (enableFileIOThreadSleep) Bukkit.getLogger().info("Enabled sleeping between chunk saves, beware of memory issues");
+-    }
+-
+-    public static boolean loadPermsBeforePlugins = true;
+-    private static void loadPermsBeforePlugins() {
+-        loadPermsBeforePlugins = getBoolean("settings.load-permissions-yml-before-plugins", true);
+-    }
+-
+-    public static int regionFileCacheSize = 256;
+-    private static void regionFileCacheSize() {
+-        regionFileCacheSize = getInt("settings.region-file-cache-size", 256);
+-    }
+-
+-    public static boolean enablePlayerCollisions = true;
+-    private static void enablePlayerCollisions() {
+-        enablePlayerCollisions = getBoolean("settings.enable-player-collisions", true);
+-    }
+-
+-    public static boolean saveEmptyScoreboardTeams = false;
+-    private static void saveEmptyScoreboardTeams() {
+-        saveEmptyScoreboardTeams = getBoolean("settings.save-empty-scoreboard-teams", false);
+-    }
+-
+-    public static boolean bungeeOnlineMode = true;
+-    private static void bungeeOnlineMode() {
+-        bungeeOnlineMode = getBoolean("settings.bungee-online-mode", true);
+-    }
+-
+-    public static boolean isProxyOnlineMode() {
+-        return Bukkit.getOnlineMode() || (SpigotConfig.bungee && bungeeOnlineMode) || (velocitySupport && velocityOnlineMode);
+-    }
+-
+-    public static int packetInSpamThreshold = 300;
+-    private static void packetInSpamThreshold() {
+-        if (version < 11) {
+-            int oldValue = getInt("settings.play-in-use-item-spam-threshold", 300);
+-            set("settings.incoming-packet-spam-threshold", oldValue);
+-        }
+-        packetInSpamThreshold = getInt("settings.incoming-packet-spam-threshold", 300);
+-    }
+-
+-    public static String flyingKickPlayerMessage = "Flying is not enabled on this server";
+-    public static String flyingKickVehicleMessage = "Flying is not enabled on this server";
+-    private static void flyingKickMessages() {
+-        flyingKickPlayerMessage = getString("messages.kick.flying-player", flyingKickPlayerMessage);
+-        flyingKickVehicleMessage = getString("messages.kick.flying-vehicle", flyingKickVehicleMessage);
+-    }
+-
+-    public static int playerAutoSaveRate = -1;
+-    public static int maxPlayerAutoSavePerTick = 10;
+-    private static void playerAutoSaveRate() {
+-        playerAutoSaveRate = getInt("settings.player-auto-save-rate", -1);
+-        maxPlayerAutoSavePerTick = getInt("settings.max-player-auto-save-per-tick", -1);
+-        if (maxPlayerAutoSavePerTick == -1) { // -1 Automatic / "Recommended"
+-            // 10 should be safe for everyone unless your mass spamming player auto save
+-            maxPlayerAutoSavePerTick = (playerAutoSaveRate == -1 || playerAutoSaveRate > 100) ? 10 : 20;
+-        }
+-    }
+-
+-    public static boolean suggestPlayersWhenNullTabCompletions = true;
+-    private static void suggestPlayersWhenNull() {
+-        suggestPlayersWhenNullTabCompletions = getBoolean("settings.suggest-player-names-when-null-tab-completions", suggestPlayersWhenNullTabCompletions);
+-    }
+-
+-    public static String authenticationServersDownKickMessage = ""; // empty = use translatable message
+-    private static void authenticationServersDownKickMessage() {
+-        authenticationServersDownKickMessage = Strings.emptyToNull(getString("messages.kick.authentication-servers-down", authenticationServersDownKickMessage));
+-    }
+-
+-    public static String connectionThrottleKickMessage = "Connection throttled! Please wait before reconnecting.";
+-    private static void connectionThrottleKickMessage() {
+-        connectionThrottleKickMessage = getString("messages.kick.connection-throttle", connectionThrottleKickMessage);
+-    }
+-
+-    public static String noPermissionMessage = "&cI'm sorry, but you do not have permission to perform this command. Please contact the server administrators if you believe that this is in error.";
+-    private static void noPermissionMessage() {
+-        noPermissionMessage = ChatColor.translateAlternateColorCodes('&', getString("messages.no-permission", noPermissionMessage));
+-    }
+-
+-    public static boolean savePlayerData = true;
+-    private static void savePlayerData() {
+-        savePlayerData = getBoolean("settings.save-player-data", savePlayerData);
+-        if(!savePlayerData) {
+-            Bukkit.getLogger().log(Level.WARNING, "Player Data Saving is currently disabled. Any changes to your players data, " +
+-                    "such as inventories, experience points, advancements and the like will not be saved when they log out.");
+-        }
+-    }
+-
+-    public static boolean useAlternativeLuckFormula = false;
+-    private static void useAlternativeLuckFormula() {
+-        useAlternativeLuckFormula = getBoolean("settings.use-alternative-luck-formula", false);
+-        if (useAlternativeLuckFormula) {
+-            Bukkit.getLogger().log(Level.INFO, "Using Aikar's Alternative Luck Formula to apply Luck attribute to all loot pool calculations. See https://luckformula.emc.gs");
+-        }
+-    }
+-
+-    public static boolean useVersionedWorld = false;
+-    private static void useVersionedWorld() {
+-        useVersionedWorld = getBoolean("settings.use-versioned-world", false);
+-        if (useVersionedWorld) {
+-            Logger logger = Bukkit.getLogger();
+-            String ver = MinecraftServer.getServer().getVersion();
+-            logger.log(Level.INFO, "******************************************************");
+-            logger.log(Level.INFO, "*** Using a versioned world folder. Your world will be saved");
+-            logger.log(Level.INFO, "*** to into the " + ver + " folder, but copied from your current world.");
+-            logger.log(Level.INFO, "*** ");
+-            logger.log(Level.INFO, "*** This setting should not be used in your real world!!!");
+-            logger.log(Level.INFO, "*** If you want to retain the new world, you need to move ");
+-            logger.log(Level.INFO, "*** the folders out of the " + ver + " folder and overwrite existing");
+-            logger.log(Level.INFO, "*** ");
+-            logger.log(Level.INFO, "*** Deleting the " + ver + " folder will cause it to recreate again");
+-            logger.log(Level.INFO, "*** from your unversioned world files.");
+-            logger.log(Level.INFO, "*** ");
+-            logger.log(Level.INFO, "*** You should backup your original world files incase something goes");
+-            logger.log(Level.INFO, "*** wrong with this system! This is not a backup system.");
+-            logger.log(Level.INFO, "******************************************************");
+-        }
+-    }
+-
+-    public static int watchdogPrintEarlyWarningEvery = 5000;
+-    public static int watchdogPrintEarlyWarningDelay = 10000;
+-    private static void watchdogEarlyWarning() {
+-        watchdogPrintEarlyWarningEvery = getInt("settings.watchdog.early-warning-every", 5000);
+-        watchdogPrintEarlyWarningDelay = getInt("settings.watchdog.early-warning-delay", 10000);
+-        WatchdogThread.doStart(SpigotConfig.timeoutTime, SpigotConfig.restartOnCrash );
+-    }
+-
+-    public static int tabSpamIncrement = 1;
+-    public static int tabSpamLimit = 500;
+-    private static void tabSpamLimiters() {
+-        tabSpamIncrement = getInt("settings.spam-limiter.tab-spam-increment", tabSpamIncrement);
+-        // Older versions used a smaller limit, which is too low for 1.13, we'll bump this up if default
+-        if (version < 14) {
+-            if (tabSpamIncrement == 10) {
+-                set("settings.spam-limiter.tab-spam-increment", 2);
+-                tabSpamIncrement = 2;
+-            }
+-        }
+-        tabSpamLimit = getInt("settings.spam-limiter.tab-spam-limit", tabSpamLimit);
+-    }
+-
+-    public static Map<String, Long> seedOverride = new java.util.HashMap<>();
+-    private static void worldSeedOverrides() {
+-        ConfigurationSection seeds = config.getConfigurationSection("seed-overrides");
+-        if (seeds != null) {
+-            TimingsManager.hiddenConfigs.add("seed-overrides");
+-            for (String key : seeds.getKeys(false)) {
+-                String seedString = seeds.getString(key);
+-                long seed;
+-                try {
+-                    seed = Long.parseLong(seedString);
+-                } catch (Exception e) {
+-                    seed = (long) seedString.hashCode();
+-                }
+-                log("Seed Override: " + key + " => " + seed);
+-                seedOverride.put(key, seed);
+-            }
+-        }
+-    }
+-
+-    public static boolean asyncChunks = false;
+-    public static boolean asyncChunkGeneration = true;
+-    public static boolean asyncChunkGenThreadPerWorld = true;
+-    public static int asyncChunkLoadThreads = -1;
+-    private static void asyncChunks() {
+-        if (version < 15) {
+-            boolean enabled = config.getBoolean("settings.async-chunks", true);
+-            ConfigurationSection section = config.createSection("settings.async-chunks");
+-            section.set("enable", enabled);
+-            section.set("load-threads", -1);
+-            section.set("generation", true);
+-            section.set("thread-per-world-generation", true);
+-        }
+-
+-        asyncChunks = getBoolean("settings.async-chunks.enable", true);
+-        asyncChunkGeneration = getBoolean("settings.async-chunks.generation", true);
+-        asyncChunkGenThreadPerWorld = getBoolean("settings.async-chunks.thread-per-world-generation", true);
+-        asyncChunkLoadThreads = getInt("settings.async-chunks.load-threads", -1);
+-        if (asyncChunkLoadThreads <= 0) {
+-            asyncChunkLoadThreads = (int) Math.min(Integer.getInteger("paper.maxChunkThreads", 8), Runtime.getRuntime().availableProcessors() * 1.5);
+-        }
+-
+-        // Let Shared Host set some limits
+-        String sharedHostEnvGen = System.getenv("PAPER_ASYNC_CHUNKS_SHARED_HOST_GEN");
+-        String sharedHostEnvLoad = System.getenv("PAPER_ASYNC_CHUNKS_SHARED_HOST_LOAD");
+-        if ("1".equals(sharedHostEnvGen)) {
+-            log("Async Chunks - Generation: Your host has requested to use a single thread world generation");
+-            asyncChunkGenThreadPerWorld = false;
+-        } else if ("2".equals(sharedHostEnvGen)) {
+-            log("Async Chunks - Generation: Your host has disabled async world generation - You will experience lag from world generation");
+-            asyncChunkGeneration = false;
+-        }
+-
+-        if (sharedHostEnvLoad != null) {
+-            try {
+-                asyncChunkLoadThreads = Math.max(1, Math.min(asyncChunkLoadThreads, Integer.parseInt(sharedHostEnvLoad)));
+-            } catch (NumberFormatException ignored) {}
+-        }
+-
+-        if (!asyncChunks) {
+-            log("Async Chunks: Disabled - Chunks will be managed synchronosuly, and will cause tremendous lag.");
+-        } else {
+-            log("Async Chunks: Enabled - Chunks will be loaded much faster, without lag.");
+-            if (!asyncChunkGeneration) {
+-                log("Async Chunks - Generation: Disabled - Chunks will be generated synchronosuly, and will cause tremendous lag.");
+-            } else if (asyncChunkGenThreadPerWorld) {
+-                log("Async Chunks - Generation: Enabled - Chunks will be generated much faster, without lag.");
+-            } else {
+-                log("Async Chunks - Generation: Enabled (Single Thread) - Chunks will be generated much faster, without lag.");
+-            }
+-        }
+-    }
+-
+-    public static boolean velocitySupport;
+-    public static boolean velocityOnlineMode;
+-    public static byte[] velocitySecretKey;
+-    private static void velocitySupport() {
+-        velocitySupport = getBoolean("settings.velocity-support.enabled", false);
+-        velocityOnlineMode = getBoolean("settings.velocity-support.online-mode", false);
+-        String secret = getString("settings.velocity-support.secret", "");
+-        if (velocitySupport && secret.isEmpty()) {
+-            fatal("Velocity support is enabled, but no secret key was specified. A secret key is required!");
+-        } else {
+-            velocitySecretKey = secret.getBytes(StandardCharsets.UTF_8);
+-        }
+-    }
+-
+-    public static int maxBookPageSize = 2560;
+-    public static double maxBookTotalSizeMultiplier = 0.98D;
+-    private static void maxBookSize() {
+-        maxBookPageSize = getInt("settings.book-size.page-max", maxBookPageSize);
+-        maxBookTotalSizeMultiplier = getDouble("settings.book-size.total-multiplier", maxBookTotalSizeMultiplier);
+-    }
+-}
++package com.destroystokyo.paper;
++
++import com.google.common.base.Strings;
++import com.google.common.base.Throwables;
++
++import java.io.File;
++import java.io.IOException;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.lang.reflect.Modifier;
++import java.nio.charset.StandardCharsets;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.TimeUnit;
++import java.util.logging.Level;
++import java.util.logging.Logger;
++import java.util.regex.Pattern;
++
++import com.google.common.collect.Lists;
++import net.minecraft.server.MinecraftServer;
++import org.bukkit.Bukkit;
++import org.bukkit.ChatColor;
++import org.bukkit.command.Command;
++import org.bukkit.configuration.ConfigurationSection;
++import org.bukkit.configuration.InvalidConfigurationException;
++import org.bukkit.configuration.file.YamlConfiguration;
++import co.aikar.timings.Timings;
++import co.aikar.timings.TimingsManager;
++import org.spigotmc.SpigotConfig;
++import org.spigotmc.WatchdogThread;
++
++public class PaperConfig {
++
++    private static File CONFIG_FILE;
++    private static final String HEADER = "This is the main configuration file for Paper.\n"
++            + "As you can see, there's tons to configure. Some options may impact gameplay, so use\n"
++            + "with caution, and make sure you know what each option does before configuring.\n"
++            + "\n"
++            + "If you need help with the configuration or have any questions related to Paper,\n"
++            + "join us in our Discord or IRC channel.\n"
++            + "\n"
++            + "Discord: https://paperdiscord.emc.gs\n"
++            + "IRC: #paper @ irc.spi.gt ( http://irc.spi.gt/iris/?channels=paper )\n"
++            + "Website: https://papermc.io/ \n"
++            + "Docs: https://paper.readthedocs.org/ \n";
++    /*========================================================================*/
++    public static YamlConfiguration config;
++    static int version;
++    static Map<String, Command> commands;
++    private static boolean verbose;
++    private static boolean fatalError;
++    /*========================================================================*/
++    private static boolean metricsStarted;
++
++    public static void init(File configFile) {
++        CONFIG_FILE = configFile;
++        config = new YamlConfiguration();
++        try {
++            config.load(CONFIG_FILE);
++        } catch (IOException ex) {
++        } catch (InvalidConfigurationException ex) {
++            Bukkit.getLogger().log(Level.SEVERE, "Could not load paper.yml, please correct your syntax errors", ex);
++            throw Throwables.propagate(ex);
++        }
++        config.options().header(HEADER);
++        config.options().copyDefaults(true);
++        verbose = getBoolean("verbose", false);
++
++        commands = new HashMap<String, Command>();
++        commands.put("paper", new PaperCommand("paper"));
++
++        version = getInt("config-version", 17);
++        set("config-version", 17);
++        readConfig(PaperConfig.class, null);
++    }
++
++    protected static void logError(String s) {
++        Bukkit.getLogger().severe(s);
++    }
++
++    protected static void fatal(String s) {
++        fatalError = true;
++        throw new RuntimeException("Fatal paper.yml config error: " + s);
++    }
++
++    protected static void log(String s) {
++        if (verbose) {
++            Bukkit.getLogger().info(s);
++        }
++    }
++
++    public static void registerCommands() {
++        for (Map.Entry<String, Command> entry : commands.entrySet()) {
++            MinecraftServer.getServer().server.getCommandMap().register(entry.getKey(), "Paper", entry.getValue());
++        }
++
++        if (!metricsStarted) {
++            Metrics.PaperMetrics.startMetrics();
++            metricsStarted = true;
++        }
++    }
++
++    static void readConfig(Class<?> clazz, Object instance) {
++        for (Method method : clazz.getDeclaredMethods()) {
++            if (Modifier.isPrivate(method.getModifiers())) {
++                if (method.getParameterTypes().length == 0 && method.getReturnType() == Void.TYPE) {
++                    try {
++                        method.setAccessible(true);
++                        method.invoke(instance);
++                    } catch (InvocationTargetException ex) {
++                        throw Throwables.propagate(ex.getCause());
++                    } catch (Exception ex) {
++                        Bukkit.getLogger().log(Level.SEVERE, "Error invoking " + method, ex);
++                    }
++                }
++            }
++        }
++
++        try {
++            config.save(CONFIG_FILE);
++        } catch (IOException ex) {
++            Bukkit.getLogger().log(Level.SEVERE, "Could not save " + CONFIG_FILE, ex);
++        }
++    }
++
++    private static final Pattern SPACE = Pattern.compile(" ");
++    private static final Pattern NOT_NUMERIC = Pattern.compile("[^-\\d.]");
++    public static int getSeconds(String str) {
++        str = SPACE.matcher(str).replaceAll("");
++        final char unit = str.charAt(str.length() - 1);
++        str = NOT_NUMERIC.matcher(str).replaceAll("");
++        double num;
++        try {
++            num = Double.parseDouble(str);
++        } catch (Exception e) {
++            num = 0D;
++        }
++        switch (unit) {
++            case 'd': num *= (double) 60*60*24; break;
++            case 'h': num *= (double) 60*60; break;
++            case 'm': num *= (double) 60; break;
++            default: case 's': break;
++        }
++        return (int) num;
++    }
++
++    protected static String timeSummary(int seconds) {
++        String time = "";
++
++        if (seconds > 60 * 60 * 24) {
++            time += TimeUnit.SECONDS.toDays(seconds) + "d";
++            seconds %= 60 * 60 * 24;
++        }
++
++        if (seconds > 60 * 60) {
++            time += TimeUnit.SECONDS.toHours(seconds) + "h";
++            seconds %= 60 * 60;
++        }
++
++        if (seconds > 0) {
++            time += TimeUnit.SECONDS.toMinutes(seconds) + "m";
++        }
++        return time;
++    }
++
++    private static void set(String path, Object val) {
++        config.set(path, val);
++    }
++
++    private static boolean getBoolean(String path, boolean def) {
++        config.addDefault(path, def);
++        return config.getBoolean(path, config.getBoolean(path));
++    }
++
++    private static double getDouble(String path, double def) {
++        config.addDefault(path, def);
++        return config.getDouble(path, config.getDouble(path));
++    }
++
++    private static float getFloat(String path, float def) {
++        // TODO: Figure out why getFloat() always returns the default value.
++        return (float) getDouble(path, (double) def);
++    }
++
++    private static int getInt(String path, int def) {
++        config.addDefault(path, def);
++        return config.getInt(path, config.getInt(path));
++    }
++
++    private static <T> List getList(String path, T def) {
++        config.addDefault(path, def);
++        return (List<T>) config.getList(path, config.getList(path));
++    }
++
++    private static String getString(String path, String def) {
++        config.addDefault(path, def);
++        return config.getString(path, config.getString(path));
++    }
++
++    public static int maxTickMsLostLightQueue;
++    private static void lightQueue() {
++        int badSetting = config.getInt("queue-light-updates-max-loss", 10);
++        config.set("queue-light-updates-max-loss", null);
++        maxTickMsLostLightQueue = getInt("settings.queue-light-updates-max-loss", badSetting);
++    }
++
++    private static void timings() {
++        boolean timings = getBoolean("timings.enabled", true);
++        boolean verboseTimings = getBoolean("timings.verbose", true);
++        TimingsManager.privacy = getBoolean("timings.server-name-privacy", false);
++        TimingsManager.hiddenConfigs = getList("timings.hidden-config-entries", Lists.newArrayList("database", "settings.bungeecord-addresses"));
++        int timingHistoryInterval = getInt("timings.history-interval", 300);
++        int timingHistoryLength = getInt("timings.history-length", 3600);
++
++
++        Timings.setVerboseTimingsEnabled(verboseTimings);
++        Timings.setTimingsEnabled(timings);
++        Timings.setHistoryInterval(timingHistoryInterval * 20);
++        Timings.setHistoryLength(timingHistoryLength * 20);
++
++        log("Timings: " + timings +
++                " - Verbose: " + verboseTimings +
++                " - Interval: " + timeSummary(Timings.getHistoryInterval() / 20) +
++                " - Length: " + timeSummary(Timings.getHistoryLength() / 20));
++    }
++
++    public static boolean enableFileIOThreadSleep;
++    private static void enableFileIOThreadSleep() {
++        enableFileIOThreadSleep = getBoolean("settings.sleep-between-chunk-saves", false);
++        if (enableFileIOThreadSleep) Bukkit.getLogger().info("Enabled sleeping between chunk saves, beware of memory issues");
++    }
++
++    public static boolean loadPermsBeforePlugins = true;
++    private static void loadPermsBeforePlugins() {
++        loadPermsBeforePlugins = getBoolean("settings.load-permissions-yml-before-plugins", true);
++    }
++
++    public static int regionFileCacheSize = 256;
++    private static void regionFileCacheSize() {
++        regionFileCacheSize = getInt("settings.region-file-cache-size", 256);
++    }
++
++    public static boolean enablePlayerCollisions = true;
++    private static void enablePlayerCollisions() {
++        enablePlayerCollisions = getBoolean("settings.enable-player-collisions", true);
++    }
++
++    public static boolean saveEmptyScoreboardTeams = false;
++    private static void saveEmptyScoreboardTeams() {
++        saveEmptyScoreboardTeams = getBoolean("settings.save-empty-scoreboard-teams", false);
++    }
++
++    public static boolean bungeeOnlineMode = true;
++    private static void bungeeOnlineMode() {
++        bungeeOnlineMode = getBoolean("settings.bungee-online-mode", true);
++    }
++
++    public static boolean isProxyOnlineMode() {
++        return Bukkit.getOnlineMode() || (SpigotConfig.bungee && bungeeOnlineMode) || (velocitySupport && velocityOnlineMode);
++    }
++
++    public static int packetInSpamThreshold = 300;
++    private static void packetInSpamThreshold() {
++        if (version < 11) {
++            int oldValue = getInt("settings.play-in-use-item-spam-threshold", 300);
++            set("settings.incoming-packet-spam-threshold", oldValue);
++        }
++        packetInSpamThreshold = getInt("settings.incoming-packet-spam-threshold", 300);
++    }
++
++    public static String flyingKickPlayerMessage = "Flying is not enabled on this server";
++    public static String flyingKickVehicleMessage = "Flying is not enabled on this server";
++    private static void flyingKickMessages() {
++        flyingKickPlayerMessage = getString("messages.kick.flying-player", flyingKickPlayerMessage);
++        flyingKickVehicleMessage = getString("messages.kick.flying-vehicle", flyingKickVehicleMessage);
++    }
++
++    public static int playerAutoSaveRate = -1;
++    public static int maxPlayerAutoSavePerTick = 10;
++    private static void playerAutoSaveRate() {
++        playerAutoSaveRate = getInt("settings.player-auto-save-rate", -1);
++        maxPlayerAutoSavePerTick = getInt("settings.max-player-auto-save-per-tick", -1);
++        if (maxPlayerAutoSavePerTick == -1) { // -1 Automatic / "Recommended"
++            // 10 should be safe for everyone unless your mass spamming player auto save
++            maxPlayerAutoSavePerTick = (playerAutoSaveRate == -1 || playerAutoSaveRate > 100) ? 10 : 20;
++        }
++    }
++
++    public static boolean suggestPlayersWhenNullTabCompletions = true;
++    private static void suggestPlayersWhenNull() {
++        suggestPlayersWhenNullTabCompletions = getBoolean("settings.suggest-player-names-when-null-tab-completions", suggestPlayersWhenNullTabCompletions);
++    }
++
++    public static String authenticationServersDownKickMessage = ""; // empty = use translatable message
++    private static void authenticationServersDownKickMessage() {
++        authenticationServersDownKickMessage = Strings.emptyToNull(getString("messages.kick.authentication-servers-down", authenticationServersDownKickMessage));
++    }
++
++    public static String connectionThrottleKickMessage = "Connection throttled! Please wait before reconnecting.";
++    private static void connectionThrottleKickMessage() {
++        connectionThrottleKickMessage = getString("messages.kick.connection-throttle", connectionThrottleKickMessage);
++    }
++
++    public static String noPermissionMessage = "&cI'm sorry, but you do not have permission to perform this command. Please contact the server administrators if you believe that this is in error.";
++    private static void noPermissionMessage() {
++        noPermissionMessage = ChatColor.translateAlternateColorCodes('&', getString("messages.no-permission", noPermissionMessage));
++    }
++
++    public static boolean savePlayerData = true;
++    private static void savePlayerData() {
++        savePlayerData = getBoolean("settings.save-player-data", savePlayerData);
++        if(!savePlayerData) {
++            Bukkit.getLogger().log(Level.WARNING, "Player Data Saving is currently disabled. Any changes to your players data, " +
++                    "such as inventories, experience points, advancements and the like will not be saved when they log out.");
++        }
++    }
++
++    public static boolean useAlternativeLuckFormula = false;
++    private static void useAlternativeLuckFormula() {
++        useAlternativeLuckFormula = getBoolean("settings.use-alternative-luck-formula", false);
++        if (useAlternativeLuckFormula) {
++            Bukkit.getLogger().log(Level.INFO, "Using Aikar's Alternative Luck Formula to apply Luck attribute to all loot pool calculations. See https://luckformula.emc.gs");
++        }
++    }
++
++    public static boolean useVersionedWorld = false;
++    private static void useVersionedWorld() {
++        useVersionedWorld = getBoolean("settings.use-versioned-world", false);
++        if (useVersionedWorld) {
++            Logger logger = Bukkit.getLogger();
++            String ver = MinecraftServer.getServer().getVersion();
++            logger.log(Level.INFO, "******************************************************");
++            logger.log(Level.INFO, "*** Using a versioned world folder. Your world will be saved");
++            logger.log(Level.INFO, "*** to into the " + ver + " folder, but copied from your current world.");
++            logger.log(Level.INFO, "*** ");
++            logger.log(Level.INFO, "*** This setting should not be used in your real world!!!");
++            logger.log(Level.INFO, "*** If you want to retain the new world, you need to move ");
++            logger.log(Level.INFO, "*** the folders out of the " + ver + " folder and overwrite existing");
++            logger.log(Level.INFO, "*** ");
++            logger.log(Level.INFO, "*** Deleting the " + ver + " folder will cause it to recreate again");
++            logger.log(Level.INFO, "*** from your unversioned world files.");
++            logger.log(Level.INFO, "*** ");
++            logger.log(Level.INFO, "*** You should backup your original world files incase something goes");
++            logger.log(Level.INFO, "*** wrong with this system! This is not a backup system.");
++            logger.log(Level.INFO, "******************************************************");
++        }
++    }
++
++    public static int watchdogPrintEarlyWarningEvery = 5000;
++    public static int watchdogPrintEarlyWarningDelay = 10000;
++    private static void watchdogEarlyWarning() {
++        watchdogPrintEarlyWarningEvery = getInt("settings.watchdog.early-warning-every", 5000);
++        watchdogPrintEarlyWarningDelay = getInt("settings.watchdog.early-warning-delay", 10000);
++        WatchdogThread.doStart(SpigotConfig.timeoutTime, SpigotConfig.restartOnCrash );
++    }
++
++    public static int tabSpamIncrement = 1;
++    public static int tabSpamLimit = 500;
++    private static void tabSpamLimiters() {
++        tabSpamIncrement = getInt("settings.spam-limiter.tab-spam-increment", tabSpamIncrement);
++        // Older versions used a smaller limit, which is too low for 1.13, we'll bump this up if default
++        if (version < 14) {
++            if (tabSpamIncrement == 10) {
++                set("settings.spam-limiter.tab-spam-increment", 2);
++                tabSpamIncrement = 2;
++            }
++        }
++        tabSpamLimit = getInt("settings.spam-limiter.tab-spam-limit", tabSpamLimit);
++    }
++
++    public static Map<String, Long> seedOverride = new java.util.HashMap<>();
++    private static void worldSeedOverrides() {
++        ConfigurationSection seeds = config.getConfigurationSection("seed-overrides");
++        if (seeds != null) {
++            TimingsManager.hiddenConfigs.add("seed-overrides");
++            for (String key : seeds.getKeys(false)) {
++                String seedString = seeds.getString(key);
++                long seed;
++                try {
++                    seed = Long.parseLong(seedString);
++                } catch (Exception e) {
++                    seed = (long) seedString.hashCode();
++                }
++                log("Seed Override: " + key + " => " + seed);
++                seedOverride.put(key, seed);
++            }
++        }
++    }
++
++    public static boolean asyncChunks = false;
++    public static boolean asyncChunkGeneration = true;
++    public static boolean asyncChunkGenThreadPerWorld = true;
++    public static int asyncChunkLoadThreads = -1;
++    private static void asyncChunks() {
++        if (version < 15) {
++            boolean enabled = config.getBoolean("settings.async-chunks", true);
++            ConfigurationSection section = config.createSection("settings.async-chunks");
++            section.set("enable", enabled);
++            section.set("load-threads", -1);
++            section.set("generation", true);
++            section.set("thread-per-world-generation", true);
++        }
++
++        asyncChunks = getBoolean("settings.async-chunks.enable", true);
++        asyncChunkGeneration = getBoolean("settings.async-chunks.generation", true);
++        asyncChunkGenThreadPerWorld = getBoolean("settings.async-chunks.thread-per-world-generation", true);
++        asyncChunkLoadThreads = getInt("settings.async-chunks.load-threads", -1);
++        if (asyncChunkLoadThreads <= 0) {
++            asyncChunkLoadThreads = (int) Math.min(Integer.getInteger("paper.maxChunkThreads", 8), Runtime.getRuntime().availableProcessors() * 1.5);
++        }
++
++        // Let Shared Host set some limits
++        String sharedHostEnvGen = System.getenv("PAPER_ASYNC_CHUNKS_SHARED_HOST_GEN");
++        String sharedHostEnvLoad = System.getenv("PAPER_ASYNC_CHUNKS_SHARED_HOST_LOAD");
++        if ("1".equals(sharedHostEnvGen)) {
++            log("Async Chunks - Generation: Your host has requested to use a single thread world generation");
++            asyncChunkGenThreadPerWorld = false;
++        } else if ("2".equals(sharedHostEnvGen)) {
++            log("Async Chunks - Generation: Your host has disabled async world generation - You will experience lag from world generation");
++            asyncChunkGeneration = false;
++        }
++
++        if (sharedHostEnvLoad != null) {
++            try {
++                asyncChunkLoadThreads = Math.max(1, Math.min(asyncChunkLoadThreads, Integer.parseInt(sharedHostEnvLoad)));
++            } catch (NumberFormatException ignored) {}
++        }
++
++        if (!asyncChunks) {
++            log("Async Chunks: Disabled - Chunks will be managed synchronosuly, and will cause tremendous lag.");
++        } else {
++            log("Async Chunks: Enabled - Chunks will be loaded much faster, without lag.");
++            if (!asyncChunkGeneration) {
++                log("Async Chunks - Generation: Disabled - Chunks will be generated synchronosuly, and will cause tremendous lag.");
++            } else if (asyncChunkGenThreadPerWorld) {
++                log("Async Chunks - Generation: Enabled - Chunks will be generated much faster, without lag.");
++            } else {
++                log("Async Chunks - Generation: Enabled (Single Thread) - Chunks will be generated much faster, without lag.");
++            }
++        }
++    }
++
++    public static boolean velocitySupport;
++    public static boolean velocityOnlineMode;
++    public static byte[] velocitySecretKey;
++    private static void velocitySupport() {
++        velocitySupport = getBoolean("settings.velocity-support.enabled", false);
++        velocityOnlineMode = getBoolean("settings.velocity-support.online-mode", false);
++        String secret = getString("settings.velocity-support.secret", "");
++        if (velocitySupport && secret.isEmpty()) {
++            fatal("Velocity support is enabled, but no secret key was specified. A secret key is required!");
++        } else {
++            velocitySecretKey = secret.getBytes(StandardCharsets.UTF_8);
++        }
++    }
++
++    public static int maxBookPageSize = 2560;
++    public static double maxBookTotalSizeMultiplier = 0.98D;
++    private static void maxBookSize() {
++        maxBookPageSize = getInt("settings.book-size.page-max", maxBookPageSize);
++        maxBookTotalSizeMultiplier = getDouble("settings.book-size.total-multiplier", maxBookTotalSizeMultiplier);
++    }
++    
++    public static boolean skipPermissionChecksForTabCompletion = false;
++    private static void skipTabPermissionChecks() {
++    	skipPermissionChecksForTabCompletion = getBoolean("settings.skip-permission-checks-for-tab-completion", skipPermissionChecksForTabCompletion);
++    }
++
++}
+diff --git a/src/main/java/net/minecraft/server/CommandDispatcher.java b/src/main/java/net/minecraft/server/CommandDispatcher.java
+index b1bd08e5..3ff1d56c 100644
+--- a/src/main/java/net/minecraft/server/CommandDispatcher.java
++++ b/src/main/java/net/minecraft/server/CommandDispatcher.java
+@@ -1,351 +1,359 @@
+-package net.minecraft.server;
+-
+-import com.google.common.collect.Maps;
+-import com.google.common.io.Files;
+-import com.google.gson.GsonBuilder;
+-import com.mojang.brigadier.StringReader;
+-import com.mojang.brigadier.arguments.ArgumentType;
+-import com.mojang.brigadier.builder.ArgumentBuilder;
+-import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+-import com.mojang.brigadier.builder.RequiredArgumentBuilder;
+-import com.mojang.brigadier.context.CommandContext;
+-import com.mojang.brigadier.exceptions.CommandSyntaxException;
+-import com.mojang.brigadier.tree.CommandNode;
+-import com.mojang.brigadier.tree.RootCommandNode;
+-import java.io.File;
+-import java.io.IOException;
+-import java.nio.charset.StandardCharsets;
+-import java.util.Collection;
+-import java.util.Iterator;
+-import java.util.Map;
+-import java.util.function.Predicate;
+-import org.apache.logging.log4j.LogManager;
+-import org.apache.logging.log4j.Logger;
+-
+-// CraftBukkit start
+-import com.google.common.base.Joiner;
+-import java.util.LinkedHashSet;
+-import org.bukkit.craftbukkit.command.VanillaCommandWrapper;
+-import org.bukkit.event.player.PlayerCommandSendEvent;
+-import org.bukkit.event.server.ServerCommandEvent;
+-// CraftBukkit end
+-
+-public class CommandDispatcher {
+-
+-    private static final Logger a = LogManager.getLogger();
+-    private final com.mojang.brigadier.CommandDispatcher<CommandListenerWrapper> b = new com.mojang.brigadier.CommandDispatcher();
+-
+-    // CraftBukkit start
+-    public final CommandDispatcher init(boolean flag) {
+-        CommandAdvancement.a(this.b);
+-        CommandExecute.a(this.b);
+-        CommandBossBar.a(this.b);
+-        CommandClear.a(this.b);
+-        CommandClone.a(this.b);
+-        CommandData.a(this.b);
+-        CommandDatapack.a(this.b);
+-        CommandDebug.a(this.b);
+-        CommandGamemodeDefault.a(this.b);
+-        CommandDifficulty.a(this.b);
+-        CommandEffect.a(this.b);
+-        CommandMe.a(this.b);
+-        CommandEnchant.a(this.b);
+-        CommandXp.a(this.b);
+-        CommandFill.a(this.b);
+-        CommandFunction.a(this.b);
+-        CommandGamemode.a(this.b);
+-        CommandGamerule.a(this.b);
+-        CommandGive.a(this.b);
+-        CommandHelp.a(this.b);
+-        CommandKick.a(this.b);
+-        CommandKill.a(this.b);
+-        CommandList.a(this.b);
+-        CommandLocate.a(this.b);
+-        CommandTell.a(this.b);
+-        CommandParticle.a(this.b);
+-        CommandPlaySound.a(this.b);
+-        CommandPublish.a(this.b);
+-        CommandReload.a(this.b);
+-        CommandRecipe.a(this.b);
+-        CommandReplaceItem.a(this.b);
+-        CommandSay.a(this.b);
+-        CommandScoreboard.a(this.b);
+-        CommandSeed.a(this.b);
+-        CommandSetBlock.a(this.b);
+-        CommandSpawnpoint.a(this.b);
+-        CommandSetWorldSpawn.a(this.b);
+-        CommandSpreadPlayers.a(this.b);
+-        CommandStopSound.a(this.b);
+-        CommandSummon.a(this.b);
+-        CommandTag.a(this.b);
+-        CommandTeam.a(this.b);
+-        CommandTeleport.a(this.b);
+-        CommandTellRaw.a(this.b);
+-        CommandForceload.a(this.b);
+-        CommandTime.a(this.b);
+-        CommandTitle.a(this.b);
+-        CommandTrigger.a(this.b);
+-        CommandWeather.a(this.b);
+-        CommandWorldBorder.a(this.b);
+-        if (flag) {
+-            CommandBanIp.a(this.b);
+-            CommandBanList.a(this.b);
+-            CommandBan.a(this.b);
+-            CommandDeop.a(this.b);
+-            CommandOp.a(this.b);
+-            CommandPardon.a(this.b);
+-            CommandPardonIP.a(this.b);
+-            CommandSaveAll.a(this.b);
+-            CommandSaveOff.a(this.b);
+-            CommandSaveOn.a(this.b);
+-            CommandIdleTimeout.a(this.b);
+-            CommandStop.a(this.b);
+-            CommandWhitelist.a(this.b);
+-        }
+-
+-        this.b.findAmbiguities((commandnode, commandnode1, commandnode2, collection) -> {
+-            // CommandDispatcher.a.warn("Ambiguity between arguments {} and {} with inputs: {}", this.b.getPath(commandnode1), this.b.getPath(commandnode2), collection); // CraftBukkit
+-        });
+-        return this;
+-    }
+-
+-    public CommandDispatcher() {
+-        // CraftBukkit end
+-        this.b.setConsumer((commandcontext, flag1, i) -> {
+-            ((CommandListenerWrapper) commandcontext.getSource()).a(commandcontext, flag1, i);
+-        });
+-    }
+-
+-    public void a(File file) {
+-        try {
+-            Files.write((new GsonBuilder()).setPrettyPrinting().create().toJson(ArgumentRegistry.a(this.b, (CommandNode) this.b.getRoot())), file, StandardCharsets.UTF_8);
+-        } catch (IOException ioexception) {
+-            CommandDispatcher.a.error("Couldn't write out command tree!", ioexception);
+-        }
+-
+-    }
+-
+-    // CraftBukkit start
+-    public int dispatchServerCommand(CommandListenerWrapper sender, String command) {
+-        Joiner joiner = Joiner.on(" ");
+-        if (command.startsWith("/")) {
+-            command = command.substring(1);
+-        }
+-
+-        ServerCommandEvent event = new ServerCommandEvent(sender.getBukkitSender(), command);
+-        org.bukkit.Bukkit.getPluginManager().callEvent(event);
+-        if (event.isCancelled()) {
+-            return 0;
+-        }
+-        command = event.getCommand();
+-
+-        String[] args = command.split(" ");
+-
+-        String cmd = args[0];
+-        if (cmd.startsWith("minecraft:")) cmd = cmd.substring("minecraft:".length());
+-        if (cmd.startsWith("bukkit:")) cmd = cmd.substring("bukkit:".length());
+-
+-        // Block disallowed commands
+-        if (cmd.equalsIgnoreCase("stop") || cmd.equalsIgnoreCase("kick") || cmd.equalsIgnoreCase("op")
+-                || cmd.equalsIgnoreCase("deop") || cmd.equalsIgnoreCase("ban") || cmd.equalsIgnoreCase("ban-ip")
+-                || cmd.equalsIgnoreCase("pardon") || cmd.equalsIgnoreCase("pardon-ip") || cmd.equalsIgnoreCase("reload")) {
+-            return 0;
+-        }
+-
+-        // Handle vanilla commands;
+-        if (sender.getWorld().getServer().getCommandBlockOverride(args[0])) {
+-            args[0] = "minecraft:" + args[0];
+-        }
+-
+-        return this.a(sender, joiner.join(args));
+-    }
+-
+-    public int a(CommandListenerWrapper commandlistenerwrapper, String s) {
+-        return this.a(commandlistenerwrapper, s, s);
+-    }
+-
+-    public int a(CommandListenerWrapper commandlistenerwrapper, String s, String label) {
+-        // CraftBukkit end
+-        StringReader stringreader = new StringReader(s);
+-
+-        if (stringreader.canRead() && stringreader.peek() == '/') {
+-            stringreader.skip();
+-        }
+-
+-        commandlistenerwrapper.getServer().methodProfiler.enter(s);
+-
+-        byte b0;
+-
+-        try {
+-            ChatComponentText chatcomponenttext;
+-
+-            try {
+-                int i = this.b.execute(stringreader, commandlistenerwrapper);
+-
+-                return i;
+-            } catch (CommandException commandexception) {
+-                commandlistenerwrapper.sendFailureMessage(commandexception.a());
+-                b0 = 0;
+-                return b0;
+-            } catch (CommandSyntaxException commandsyntaxexception) {
+-                commandlistenerwrapper.sendFailureMessage(ChatComponentUtils.a(commandsyntaxexception.getRawMessage()));
+-                if (commandsyntaxexception.getInput() != null && commandsyntaxexception.getCursor() >= 0) {
+-                    int j = Math.min(commandsyntaxexception.getInput().length(), commandsyntaxexception.getCursor());
+-
+-                    chatcomponenttext = new ChatComponentText("");
+-                    if (j > 10) {
+-                        chatcomponenttext.a("...");
+-                    }
+-
+-                    chatcomponenttext.a(commandsyntaxexception.getInput().substring(Math.max(0, j - 10), j));
+-                    if (j < commandsyntaxexception.getInput().length()) {
+-                        ChatComponentText chatcomponenttext1 = new ChatComponentText(commandsyntaxexception.getInput().substring(j));
+-
+-                        chatcomponenttext1.getChatModifier().setColor(EnumChatFormat.RED);
+-                        chatcomponenttext1.getChatModifier().setUnderline(Boolean.valueOf(true));
+-                        chatcomponenttext.addSibling(chatcomponenttext1);
+-                    }
+-
+-                    ChatMessage chatmessage = new ChatMessage("command.context.here", new Object[0]);
+-
+-                    chatmessage.getChatModifier().setItalic(Boolean.valueOf(true));
+-                    chatmessage.getChatModifier().setColor(EnumChatFormat.RED);
+-                    chatcomponenttext.addSibling(chatmessage);
+-                    chatcomponenttext.getChatModifier().setColor(EnumChatFormat.GRAY);
+-                    chatcomponenttext.getChatModifier().setChatClickable(new ChatClickable(ChatClickable.EnumClickAction.SUGGEST_COMMAND, label)); // CraftBukkit
+-                    commandlistenerwrapper.sendFailureMessage(chatcomponenttext);
+-                }
+-
+-                b0 = 0;
+-            } catch (Exception exception) {
+-                ChatMessage chatmessage1 = new ChatMessage("command.failed", new Object[0]);
+-
+-                chatcomponenttext = new ChatComponentText(exception.getMessage() == null ? exception.getClass().getName() : exception.getMessage());
+-                if (CommandDispatcher.a.isDebugEnabled()) {
+-                    StackTraceElement[] astacktraceelement = exception.getStackTrace();
+-
+-                    for (int k = 0; k < Math.min(astacktraceelement.length, 3); ++k) {
+-                        chatcomponenttext.a("\n\n" + astacktraceelement[k].getMethodName() + "\n " + astacktraceelement[k].getFileName() + ":" + astacktraceelement[k].getLineNumber());
+-                    }
+-                }
+-
+-                chatmessage1.getChatModifier().setChatHoverable(new ChatHoverable(ChatHoverable.EnumHoverAction.SHOW_TEXT, chatcomponenttext));
+-                commandlistenerwrapper.sendFailureMessage(chatmessage1);
+-                byte b1 = 0;
+-
+-                return b1;
+-            }
+-        } finally {
+-            commandlistenerwrapper.getServer().methodProfiler.exit();
+-        }
+-
+-        return b0;
+-    }
+-
+-    public void a(EntityPlayer entityplayer) {
+-        if ( org.spigotmc.SpigotConfig.tabComplete < 0 ) return; // Spigot
+-        // CraftBukkit start
+-        // Register Vanilla commands into builtRoot as before
+-        Map<CommandNode<CommandListenerWrapper>, CommandNode<ICompletionProvider>> map = Maps.newIdentityHashMap(); // Use identity to prevent aliasing issues
+-        RootCommandNode vanillaRoot = new RootCommandNode();
+-
+-        RootCommandNode<CommandListenerWrapper> vanilla = entityplayer.server.vanillaCommandDispatcher.a().getRoot();
+-        map.put(vanilla, vanillaRoot);
+-        this.a(vanilla, vanillaRoot, entityplayer.getCommandListener(), (Map) map);
+-
+-        // Now build the global commands in a second pass
+-        RootCommandNode<ICompletionProvider> rootcommandnode = new RootCommandNode();
+-
+-        map.put(this.b.getRoot(), rootcommandnode);
+-        this.a(this.b.getRoot(), rootcommandnode, entityplayer.getCommandListener(), (Map) map);
+-
+-        Collection<String> bukkit = new LinkedHashSet<>();
+-        for (CommandNode node : rootcommandnode.getChildren()) {
+-            bukkit.add(node.getName());
+-        }
+-
+-        PlayerCommandSendEvent event = new PlayerCommandSendEvent(entityplayer.getBukkitEntity(), new LinkedHashSet<>(bukkit));
+-        event.getPlayer().getServer().getPluginManager().callEvent(event);
+-
+-        // Remove labels that were removed during the event
+-        for (String orig : bukkit) {
+-            if (!event.getCommands().contains(orig)) {
+-                rootcommandnode.removeCommand(orig);
+-            }
+-        }
+-        // CraftBukkit end
+-        entityplayer.playerConnection.sendPacket(new PacketPlayOutCommands(rootcommandnode));
+-    }
+-
+-    private void a(CommandNode<CommandListenerWrapper> commandnode, CommandNode<ICompletionProvider> commandnode1, CommandListenerWrapper commandlistenerwrapper, Map<CommandNode<CommandListenerWrapper>, CommandNode<ICompletionProvider>> map) {
+-        Iterator iterator = commandnode.getChildren().iterator();
+-
+-        while (iterator.hasNext()) {
+-            CommandNode<CommandListenerWrapper> commandnode2 = (CommandNode) iterator.next();
+-            if ( !org.spigotmc.SpigotConfig.sendNamespaced && commandnode2.getName().contains( ":" ) ) continue; // Spigot
+-
+-            if (commandnode2.canUse(commandlistenerwrapper)) {
+-                ArgumentBuilder argumentbuilder = commandnode2.createBuilder(); // CraftBukkit - decompile error
+-
+-                argumentbuilder.requires((icompletionprovider) -> {
+-                    return true;
+-                });
+-                if (argumentbuilder.getCommand() != null) {
+-                    argumentbuilder.executes((commandcontext) -> {
+-                        return 0;
+-                    });
+-                }
+-
+-                if (argumentbuilder instanceof RequiredArgumentBuilder) {
+-                    RequiredArgumentBuilder<ICompletionProvider, ?> requiredargumentbuilder = (RequiredArgumentBuilder) argumentbuilder;
+-
+-                    if (requiredargumentbuilder.getSuggestionsProvider() != null) {
+-                        requiredargumentbuilder.suggests(CompletionProviders.b(requiredargumentbuilder.getSuggestionsProvider()));
+-                    }
+-                }
+-
+-                if (argumentbuilder.getRedirect() != null) {
+-                    argumentbuilder.redirect((CommandNode) map.get(argumentbuilder.getRedirect()));
+-                }
+-
+-                CommandNode commandnode3 = argumentbuilder.build(); // CraftBukkit - decompile error
+-
+-                map.put(commandnode2, commandnode3);
+-                commandnode1.addChild(commandnode3);
+-                if (!commandnode2.getChildren().isEmpty()) {
+-                    this.a(commandnode2, commandnode3, commandlistenerwrapper, map);
+-                }
+-            }
+-        }
+-
+-    }
+-
+-    public static LiteralArgumentBuilder<CommandListenerWrapper> a(String s) {
+-        return LiteralArgumentBuilder.literal(s);
+-    }
+-
+-    public static <T> RequiredArgumentBuilder<CommandListenerWrapper, T> a(String s, ArgumentType<T> argumenttype) {
+-        return RequiredArgumentBuilder.argument(s, argumenttype);
+-    }
+-
+-    public static Predicate<String> a(CommandDispatcher.a commanddispatcher_a) {
+-        return (s) -> {
+-            try {
+-                commanddispatcher_a.parse(new StringReader(s));
+-                return true;
+-            } catch (CommandSyntaxException commandsyntaxexception) {
+-                return false;
+-            }
+-        };
+-    }
+-
+-    public com.mojang.brigadier.CommandDispatcher<CommandListenerWrapper> a() {
+-        return this.b;
+-    }
+-
+-    @FunctionalInterface
+-    public interface a {
+-
+-        void parse(StringReader stringreader) throws CommandSyntaxException;
+-    }
+-}
++package net.minecraft.server;
++
++import com.google.common.collect.Maps;
++import com.google.common.io.Files;
++import com.google.gson.GsonBuilder;
++import com.mojang.brigadier.StringReader;
++import com.mojang.brigadier.arguments.ArgumentType;
++import com.mojang.brigadier.builder.ArgumentBuilder;
++import com.mojang.brigadier.builder.LiteralArgumentBuilder;
++import com.mojang.brigadier.builder.RequiredArgumentBuilder;
++import com.mojang.brigadier.context.CommandContext;
++import com.mojang.brigadier.exceptions.CommandSyntaxException;
++import com.mojang.brigadier.tree.CommandNode;
++import com.mojang.brigadier.tree.RootCommandNode;
++import java.io.File;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.util.Collection;
++import java.util.Iterator;
++import java.util.Map;
++import java.util.function.Predicate;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++
++import com.destroystokyo.paper.PaperConfig;
++// CraftBukkit start
++import com.google.common.base.Joiner;
++import java.util.LinkedHashSet;
++import org.bukkit.craftbukkit.command.VanillaCommandWrapper;
++import org.bukkit.event.player.PlayerCommandSendEvent;
++import org.bukkit.event.server.ServerCommandEvent;
++// CraftBukkit end
++
++public class CommandDispatcher {
++
++    private static final Logger a = LogManager.getLogger();
++    private final com.mojang.brigadier.CommandDispatcher<CommandListenerWrapper> b = new com.mojang.brigadier.CommandDispatcher();
++
++    // CraftBukkit start
++    public final CommandDispatcher init(boolean flag) {
++        CommandAdvancement.a(this.b);
++        CommandExecute.a(this.b);
++        CommandBossBar.a(this.b);
++        CommandClear.a(this.b);
++        CommandClone.a(this.b);
++        CommandData.a(this.b);
++        CommandDatapack.a(this.b);
++        CommandDebug.a(this.b);
++        CommandGamemodeDefault.a(this.b);
++        CommandDifficulty.a(this.b);
++        CommandEffect.a(this.b);
++        CommandMe.a(this.b);
++        CommandEnchant.a(this.b);
++        CommandXp.a(this.b);
++        CommandFill.a(this.b);
++        CommandFunction.a(this.b);
++        CommandGamemode.a(this.b);
++        CommandGamerule.a(this.b);
++        CommandGive.a(this.b);
++        CommandHelp.a(this.b);
++        CommandKick.a(this.b);
++        CommandKill.a(this.b);
++        CommandList.a(this.b);
++        CommandLocate.a(this.b);
++        CommandTell.a(this.b);
++        CommandParticle.a(this.b);
++        CommandPlaySound.a(this.b);
++        CommandPublish.a(this.b);
++        CommandReload.a(this.b);
++        CommandRecipe.a(this.b);
++        CommandReplaceItem.a(this.b);
++        CommandSay.a(this.b);
++        CommandScoreboard.a(this.b);
++        CommandSeed.a(this.b);
++        CommandSetBlock.a(this.b);
++        CommandSpawnpoint.a(this.b);
++        CommandSetWorldSpawn.a(this.b);
++        CommandSpreadPlayers.a(this.b);
++        CommandStopSound.a(this.b);
++        CommandSummon.a(this.b);
++        CommandTag.a(this.b);
++        CommandTeam.a(this.b);
++        CommandTeleport.a(this.b);
++        CommandTellRaw.a(this.b);
++        CommandForceload.a(this.b);
++        CommandTime.a(this.b);
++        CommandTitle.a(this.b);
++        CommandTrigger.a(this.b);
++        CommandWeather.a(this.b);
++        CommandWorldBorder.a(this.b);
++        if (flag) {
++            CommandBanIp.a(this.b);
++            CommandBanList.a(this.b);
++            CommandBan.a(this.b);
++            CommandDeop.a(this.b);
++            CommandOp.a(this.b);
++            CommandPardon.a(this.b);
++            CommandPardonIP.a(this.b);
++            CommandSaveAll.a(this.b);
++            CommandSaveOff.a(this.b);
++            CommandSaveOn.a(this.b);
++            CommandIdleTimeout.a(this.b);
++            CommandStop.a(this.b);
++            CommandWhitelist.a(this.b);
++        }
++
++        this.b.findAmbiguities((commandnode, commandnode1, commandnode2, collection) -> {
++            // CommandDispatcher.a.warn("Ambiguity between arguments {} and {} with inputs: {}", this.b.getPath(commandnode1), this.b.getPath(commandnode2), collection); // CraftBukkit
++        });
++        return this;
++    }
++
++    public CommandDispatcher() {
++        // CraftBukkit end
++        this.b.setConsumer((commandcontext, flag1, i) -> {
++            ((CommandListenerWrapper) commandcontext.getSource()).a(commandcontext, flag1, i);
++        });
++    }
++
++    public void a(File file) {
++        try {
++            Files.write((new GsonBuilder()).setPrettyPrinting().create().toJson(ArgumentRegistry.a(this.b, (CommandNode) this.b.getRoot())), file, StandardCharsets.UTF_8);
++        } catch (IOException ioexception) {
++            CommandDispatcher.a.error("Couldn't write out command tree!", ioexception);
++        }
++
++    }
++
++    // CraftBukkit start
++    public int dispatchServerCommand(CommandListenerWrapper sender, String command) {
++        Joiner joiner = Joiner.on(" ");
++        if (command.startsWith("/")) {
++            command = command.substring(1);
++        }
++
++        ServerCommandEvent event = new ServerCommandEvent(sender.getBukkitSender(), command);
++        org.bukkit.Bukkit.getPluginManager().callEvent(event);
++        if (event.isCancelled()) {
++            return 0;
++        }
++        command = event.getCommand();
++
++        String[] args = command.split(" ");
++
++        String cmd = args[0];
++        if (cmd.startsWith("minecraft:")) cmd = cmd.substring("minecraft:".length());
++        if (cmd.startsWith("bukkit:")) cmd = cmd.substring("bukkit:".length());
++
++        // Block disallowed commands
++        if (cmd.equalsIgnoreCase("stop") || cmd.equalsIgnoreCase("kick") || cmd.equalsIgnoreCase("op")
++                || cmd.equalsIgnoreCase("deop") || cmd.equalsIgnoreCase("ban") || cmd.equalsIgnoreCase("ban-ip")
++                || cmd.equalsIgnoreCase("pardon") || cmd.equalsIgnoreCase("pardon-ip") || cmd.equalsIgnoreCase("reload")) {
++            return 0;
++        }
++
++        // Handle vanilla commands;
++        if (sender.getWorld().getServer().getCommandBlockOverride(args[0])) {
++            args[0] = "minecraft:" + args[0];
++        }
++
++        return this.a(sender, joiner.join(args));
++    }
++
++    public int a(CommandListenerWrapper commandlistenerwrapper, String s) {
++        return this.a(commandlistenerwrapper, s, s);
++    }
++
++    public int a(CommandListenerWrapper commandlistenerwrapper, String s, String label) {
++        // CraftBukkit end
++        StringReader stringreader = new StringReader(s);
++
++        if (stringreader.canRead() && stringreader.peek() == '/') {
++            stringreader.skip();
++        }
++
++        commandlistenerwrapper.getServer().methodProfiler.enter(s);
++
++        byte b0;
++
++        try {
++            ChatComponentText chatcomponenttext;
++
++            try {
++                int i = this.b.execute(stringreader, commandlistenerwrapper);
++
++                return i;
++            } catch (CommandException commandexception) {
++                commandlistenerwrapper.sendFailureMessage(commandexception.a());
++                b0 = 0;
++                return b0;
++            } catch (CommandSyntaxException commandsyntaxexception) {
++                commandlistenerwrapper.sendFailureMessage(ChatComponentUtils.a(commandsyntaxexception.getRawMessage()));
++                if (commandsyntaxexception.getInput() != null && commandsyntaxexception.getCursor() >= 0) {
++                    int j = Math.min(commandsyntaxexception.getInput().length(), commandsyntaxexception.getCursor());
++
++                    chatcomponenttext = new ChatComponentText("");
++                    if (j > 10) {
++                        chatcomponenttext.a("...");
++                    }
++
++                    chatcomponenttext.a(commandsyntaxexception.getInput().substring(Math.max(0, j - 10), j));
++                    if (j < commandsyntaxexception.getInput().length()) {
++                        ChatComponentText chatcomponenttext1 = new ChatComponentText(commandsyntaxexception.getInput().substring(j));
++
++                        chatcomponenttext1.getChatModifier().setColor(EnumChatFormat.RED);
++                        chatcomponenttext1.getChatModifier().setUnderline(Boolean.valueOf(true));
++                        chatcomponenttext.addSibling(chatcomponenttext1);
++                    }
++
++                    ChatMessage chatmessage = new ChatMessage("command.context.here", new Object[0]);
++
++                    chatmessage.getChatModifier().setItalic(Boolean.valueOf(true));
++                    chatmessage.getChatModifier().setColor(EnumChatFormat.RED);
++                    chatcomponenttext.addSibling(chatmessage);
++                    chatcomponenttext.getChatModifier().setColor(EnumChatFormat.GRAY);
++                    chatcomponenttext.getChatModifier().setChatClickable(new ChatClickable(ChatClickable.EnumClickAction.SUGGEST_COMMAND, label)); // CraftBukkit
++                    commandlistenerwrapper.sendFailureMessage(chatcomponenttext);
++                }
++
++                b0 = 0;
++            } catch (Exception exception) {
++                ChatMessage chatmessage1 = new ChatMessage("command.failed", new Object[0]);
++
++                chatcomponenttext = new ChatComponentText(exception.getMessage() == null ? exception.getClass().getName() : exception.getMessage());
++                if (CommandDispatcher.a.isDebugEnabled()) {
++                    StackTraceElement[] astacktraceelement = exception.getStackTrace();
++
++                    for (int k = 0; k < Math.min(astacktraceelement.length, 3); ++k) {
++                        chatcomponenttext.a("\n\n" + astacktraceelement[k].getMethodName() + "\n " + astacktraceelement[k].getFileName() + ":" + astacktraceelement[k].getLineNumber());
++                    }
++                }
++
++                chatmessage1.getChatModifier().setChatHoverable(new ChatHoverable(ChatHoverable.EnumHoverAction.SHOW_TEXT, chatcomponenttext));
++                commandlistenerwrapper.sendFailureMessage(chatmessage1);
++                byte b1 = 0;
++
++                return b1;
++            }
++        } finally {
++            commandlistenerwrapper.getServer().methodProfiler.exit();
++        }
++
++        return b0;
++    }
++    
++    private RootCommandNode firstLoginCommandNode = null;
++
++    public void a(EntityPlayer entityplayer) {
++        if ( org.spigotmc.SpigotConfig.tabComplete < 0 ) return; // Spigot
++        if (PaperConfig.skipPermissionChecksForTabCompletion && firstLoginCommandNode != null) { // Paper start - Running checks on servers with a large amount of commands can significantly slow down logins
++        	entityplayer.playerConnection.sendPacket(new PacketPlayOutCommands(firstLoginCommandNode));
++        	return;
++        } // Paper end
++        // CraftBukkit start
++        // Register Vanilla commands into builtRoot as before
++        Map<CommandNode<CommandListenerWrapper>, CommandNode<ICompletionProvider>> map = Maps.newIdentityHashMap(); // Use identity to prevent aliasing issues
++        RootCommandNode vanillaRoot = new RootCommandNode();
++
++        RootCommandNode<CommandListenerWrapper> vanilla = entityplayer.server.vanillaCommandDispatcher.a().getRoot();
++        map.put(vanilla, vanillaRoot);
++        this.a(vanilla, vanillaRoot, entityplayer.getCommandListener(), (Map) map);
++
++        // Now build the global commands in a second pass
++        RootCommandNode<ICompletionProvider> rootcommandnode = new RootCommandNode();
++
++        map.put(this.b.getRoot(), rootcommandnode);
++        this.a(this.b.getRoot(), rootcommandnode, entityplayer.getCommandListener(), (Map) map);
++
++        Collection<String> bukkit = new LinkedHashSet<>();
++        for (CommandNode node : rootcommandnode.getChildren()) {
++            bukkit.add(node.getName());
++        }
++
++        PlayerCommandSendEvent event = new PlayerCommandSendEvent(entityplayer.getBukkitEntity(), new LinkedHashSet<>(bukkit));
++        event.getPlayer().getServer().getPluginManager().callEvent(event);
++
++        // Remove labels that were removed during the event
++        for (String orig : bukkit) {
++            if (!event.getCommands().contains(orig)) {
++                rootcommandnode.removeCommand(orig);
++            }
++        }
++        // CraftBukkit end
++        if (PaperConfig.skipPermissionChecksForTabCompletion) firstLoginCommandNode = rootcommandnode; // Paper - Running checks on servers with a large amount of commands can significantly slow down logins
++        entityplayer.playerConnection.sendPacket(new PacketPlayOutCommands(rootcommandnode));
++    }
++
++    private void a(CommandNode<CommandListenerWrapper> commandnode, CommandNode<ICompletionProvider> commandnode1, CommandListenerWrapper commandlistenerwrapper, Map<CommandNode<CommandListenerWrapper>, CommandNode<ICompletionProvider>> map) {
++        Iterator iterator = commandnode.getChildren().iterator();
++
++        while (iterator.hasNext()) {
++            CommandNode<CommandListenerWrapper> commandnode2 = (CommandNode) iterator.next();
++            if ( !org.spigotmc.SpigotConfig.sendNamespaced && commandnode2.getName().contains( ":" ) ) continue; // Spigot
++
++            if (PaperConfig.skipPermissionChecksForTabCompletion || commandnode2.canUse(commandlistenerwrapper)) { // Paper - Running checks on servers with a large amount of commands can significantly slow down logins
++                ArgumentBuilder argumentbuilder = commandnode2.createBuilder(); // CraftBukkit - decompile error
++
++                argumentbuilder.requires((icompletionprovider) -> {
++                    return true;
++                });
++                if (argumentbuilder.getCommand() != null) {
++                    argumentbuilder.executes((commandcontext) -> {
++                        return 0;
++                    });
++                }
++
++                if (argumentbuilder instanceof RequiredArgumentBuilder) {
++                    RequiredArgumentBuilder<ICompletionProvider, ?> requiredargumentbuilder = (RequiredArgumentBuilder) argumentbuilder;
++
++                    if (requiredargumentbuilder.getSuggestionsProvider() != null) {
++                        requiredargumentbuilder.suggests(CompletionProviders.b(requiredargumentbuilder.getSuggestionsProvider()));
++                    }
++                }
++
++                if (argumentbuilder.getRedirect() != null) {
++                    argumentbuilder.redirect((CommandNode) map.get(argumentbuilder.getRedirect()));
++                }
++
++                CommandNode commandnode3 = argumentbuilder.build(); // CraftBukkit - decompile error
++
++                map.put(commandnode2, commandnode3);
++                commandnode1.addChild(commandnode3);
++                if (!commandnode2.getChildren().isEmpty()) {
++                    this.a(commandnode2, commandnode3, commandlistenerwrapper, map);
++                }
++            }
++        }
++
++    }
++
++    public static LiteralArgumentBuilder<CommandListenerWrapper> a(String s) {
++        return LiteralArgumentBuilder.literal(s);
++    }
++
++    public static <T> RequiredArgumentBuilder<CommandListenerWrapper, T> a(String s, ArgumentType<T> argumenttype) {
++        return RequiredArgumentBuilder.argument(s, argumenttype);
++    }
++
++    public static Predicate<String> a(CommandDispatcher.a commanddispatcher_a) {
++        return (s) -> {
++            try {
++                commanddispatcher_a.parse(new StringReader(s));
++                return true;
++            } catch (CommandSyntaxException commandsyntaxexception) {
++                return false;
++            }
++        };
++    }
++
++    public com.mojang.brigadier.CommandDispatcher<CommandListenerWrapper> a() {
++        return this.b;
++    }
++
++    @FunctionalInterface
++    public interface a {
++
++        void parse(StringReader stringreader) throws CommandSyntaxException;
++    }
++}
+-- 
+2.16.2.windows.1
+
